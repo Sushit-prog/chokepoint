@@ -1,6 +1,10 @@
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -27,6 +31,17 @@ class Settings:
     anthropic_model: str
     eia_baseline_days: int
     eia_vol_scale: float
+    llm_provider: str
+    llm_api_key: str | None
+    llm_model: str
+
+
+PROVIDER_BASE_URLS = {
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
 
 
 def load_settings() -> Settings:
@@ -53,4 +68,7 @@ def load_settings() -> Settings:
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
         eia_baseline_days=_env_int("EIA_BASELINE_DAYS", 30),
         eia_vol_scale=_env_float("EIA_VOL_SCALE", 1.0),
+        llm_provider=os.getenv("LLM_PROVIDER", "groq").strip().lower(),
+        llm_api_key=os.getenv("LLM_API_KEY") or None,
+        llm_model=os.getenv("LLM_MODEL", "openai/gpt-oss-120b"),
     )

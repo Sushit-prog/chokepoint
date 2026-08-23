@@ -8,6 +8,11 @@ from src.extraction.gdelt_extractor import run_pending as run_gdelt_pending
 from tests.test_extraction_gdelt import StubClient, _tool_response
 
 
+@pytest.fixture(autouse=True)
+def _anthropic_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+
+
 def test_run_all_isolates_source_failures():
     def ok_runner(window):
         return 3, 0

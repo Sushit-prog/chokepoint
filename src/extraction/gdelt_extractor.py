@@ -4,73 +4,42 @@ import anthropic
 from pydantic import ValidationError
 from sqlalchemy import exists, select
 
-from src.config import Settings, load_settings
+from src.config import PROVIDER_BASE_URLS, Settings, load_settings
 from src.db.models import ExtractedFeature, Signal
 from src.db.session import SessionLocal
-from src.extraction.schema import EVENT_TYPES, ExtractedFeature as FeatureSchema
+from src.extraction.llm_client import (
+    MAX_ATTEMPTS,
+    TOOL_NAME,
+    ExtractionError,
+    SYSTEM_PROMPT,
+    build_tool_definition,
+    create_generic_caller,
+)
+from src.ingestion.common import build_http_client
+from src.extraction.schema import ExtractedFeature as FeatureSchema
 
 logger = logging.getLogger("chokepoint.extraction")
 
-TOOL_NAME = "record_extracted_feature"
 
-SYSTEM_PROMPT = (
-    "You are an energy supply chain risk analyst monitoring the Strait of "
-    "Hormuz corridor for crude oil supply risk. Classify the news article by "
-    "calling the record_extracted_feature tool exactly once.\n"
-    "Guidance:\n"
-    "- event_type: pick the closest match; use 'other' only when nothing fits.\n"
-    "- severity: 0 (irrelevant) to 5 (catastrophic, e.g. strait closure). "
-    "Routine commentary scores 1-2.\n"
-    "- confidence: how certain the classification and severity are, 0 to 1."
-)
-
-MAX_ATTEMPTS = 2
-
-
-class ExtractionError(Exception):
-    pass
-
-
-def tool_definition() -> dict:
+def _anthropic_tool() -> dict:
+    inner = build_tool_definition()["function"]
     return {
-        "name": TOOL_NAME,
-        "description": "Record the risk event extracted from a news article.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "event_type": {
-                    "type": "string",
-                    "enum": list(EVENT_TYPES),
-                    "description": "The risk event category.",
-                },
-                "severity": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 5,
-                    "description": "Supply-risk severity on a 0-5 scale.",
-                },
-                "confidence": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1,
-                    "description": "Confidence in the extraction, 0-1.",
-                },
-            },
-            "required": ["event_type", "severity", "confidence"],
-            "additionalProperties": False,
-        },
+        "name": inner["name"],
+        "description": inner["description"],
+        "input_schema": inner["parameters"],
     }
 
 
 def build_client(settings: Settings) -> anthropic.Anthropic:
     if not settings.anthropic_api_key:
         raise ExtractionError(
-            "ANTHROPIC_API_KEY env var is required for GDELT LLM extraction"
+            "ANTHROPIC_API_KEY env var is required for GDELT LLM extraction "
+            "when LLM_PROVIDER=anthropic"
         )
     return anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 
-def _validate(raw) -> FeatureSchema:
+def _validate(raw):
     return FeatureSchema.model_validate(raw)
 
 
@@ -87,7 +56,7 @@ def call_llm(client, model: str, article_payload: dict) -> tuple[FeatureSchema, 
                 "content": f"Classify this article.\nTitle: {title}\nURL: {url}",
             }
         ],
-        tools=[tool_definition()],
+        tools=[_anthropic_tool()],
         tool_choice={"type": "tool", "name": TOOL_NAME},
     )
     tool_block = next(
@@ -105,11 +74,12 @@ def call_llm(client, model: str, article_payload: dict) -> tuple[FeatureSchema, 
     return feature, model_used
 
 
-def extract_article_with_retry(client, model: str, article_payload: dict):
+def extract_article_with_retry(caller, article_payload: dict):
     last_error: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
         try:
-            return call_llm(client, model, article_payload)
+            raw, model_used = caller(article_payload)
+            return _validate(raw), model_used
         except (ValidationError, ExtractionError) as exc:
             last_error = exc
             logger.warning(
@@ -164,6 +134,21 @@ def write_feature(
         session.commit()
 
 
+def make_caller(settings: Settings, client=None):
+    if settings.llm_provider == "anthropic":
+        anthropic_client = client or build_client(settings)
+        model = settings.anthropic_model
+        return lambda payload: call_llm(anthropic_client, model, payload)
+    if settings.llm_provider not in PROVIDER_BASE_URLS:
+        raise ExtractionError(f"unsupported LLM_PROVIDER: {settings.llm_provider}")
+    if not settings.llm_api_key:
+        raise ExtractionError(
+            f"LLM_API_KEY env var is required for provider {settings.llm_provider}"
+        )
+    http_client = client or build_http_client(settings)
+    return create_generic_caller(http_client, settings)
+
+
 def run_pending(
     window: tuple,
     *,
@@ -176,17 +161,13 @@ def run_pending(
         pending = fetch_pending(session, window)
     if not pending:
         return 0, 0
-    client = client or build_client(settings)
+    caller = make_caller(settings, client)
 
     processed = 0
     failed = 0
     for signal in pending:
         try:
-            feature, model_used = extract_article_with_retry(
-                client,
-                settings.anthropic_model,
-                signal.raw_payload,
-            )
+            feature, model_used = extract_article_with_retry(caller, signal.raw_payload)
             write_feature(
                 signal.id, feature, model_used, session_factory=session_factory
             )

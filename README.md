@@ -83,7 +83,8 @@ python -m src.extraction.run --window-days 1   # needs ANTHROPIC_API_KEY for GDE
 python -m src.scoring.run --window-days 1
 ```
 
-- **GDELT**: each pending article gets one tool-forced Claude Haiku call (`ANTHROPIC_MODEL`, default `claude-haiku-4-5`) validated against the `ExtractedFeature` pydantic schema; invalid output retries exactly once, then the article is skipped (it stays pending for the next run). `model_used` records the API-reported model snapshot. One bad article never blocks the rest.
+- **GDELT**: each pending article gets one tool-forced LLM call validated against the `ExtractedFeature` pydantic schema; invalid output retries exactly once, then the article is skipped (it stays pending for the next run). One bad article never blocks the rest.
+- **Provider-agnostic LLM**: `LLM_PROVIDER` selects `groq` (default) | `nvidia` | `mistral` | `openrouter` — all via one OpenAI-compatible httpx client with forced function calling — or `anthropic` (SDK path, `ANTHROPIC_API_KEY`). Set `LLM_API_KEY` + `LLM_MODEL`; `model_used` records what actually ran. Prefer 70B-class models: 8B free variants ignore tool calls more often, and our retry-once absorbs only part of that.
 - **OFAC SDN** (deterministic): `event_type=sanctions_listing`, severity by entry type — vessel 4.5 > entity 3.0 > individual 2.0 (unknown 2.5), `confidence=1.0`, `model_used=rule_based`.
 - **EIA** (deterministic): `event_type=price_movement`; severity = |day-over-day % change| ÷ trailing-median |% change| (30-point baseline, floored at 1% as a cold-start prior), capped at 5.
 - Reruns skip signals that already have an extracted feature — extraction is idempotent.

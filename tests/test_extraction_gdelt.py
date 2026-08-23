@@ -10,6 +10,7 @@ from src.db.session import SessionLocal
 from src.extraction.gdelt_extractor import (
     ExtractionError,
     build_client,
+    call_llm,
     extract_article_with_retry,
     run_pending,
 )
@@ -17,6 +18,11 @@ from src.extraction.schema import ExtractedFeature
 
 VALID = {"event_type": "supply_disruption", "severity": 4.0, "confidence": 0.9}
 INVALID = {"event_type": "explosion", "severity": 99.0, "confidence": 2.0}
+
+
+@pytest.fixture(autouse=True)
+def _anthropic_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
 
 
 class StubBlock:
@@ -163,6 +169,20 @@ def test_rerun_skips_already_processed_signals(sample_window, make_signal):
 
 def test_extract_article_with_retry_exhausts_attempts():
     stub = StubClient([_tool_response(INVALID), _tool_response(INVALID)])
+    caller = lambda payload: call_llm(stub, "claude-haiku-4-5", payload)
     with pytest.raises(ExtractionError):
-        extract_article_with_retry(stub, "claude-haiku-4-5", {"title": "x", "url": "y"})
+        extract_article_with_retry(caller, {"title": "x", "url": "y"})
+    assert len(stub.messages.calls) == 2
+
+
+def test_extract_article_with_retry_validates_schema():
+    stub = StubClient(
+        [
+            _tool_response({"event_type": "supply_disruption", "severity": 10.0}),
+            _tool_response({"event_type": "supply_disruption", "severity": 10.0}),
+        ]
+    )
+    caller = lambda payload: call_llm(stub, "claude-haiku-4-5", payload)
+    with pytest.raises(ExtractionError):
+        extract_article_with_retry(caller, {"title": "x", "url": "y"})
     assert len(stub.messages.calls) == 2
