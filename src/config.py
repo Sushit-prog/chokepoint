@@ -23,6 +23,10 @@ class Settings:
     retry_delay_seconds: float
     corridor: str
     commodity: str
+    anthropic_api_key: str | None
+    anthropic_model: str
+    eia_baseline_days: int
+    eia_vol_scale: float
 
 
 def load_settings() -> Settings:
@@ -45,4 +49,8 @@ def load_settings() -> Settings:
         retry_delay_seconds=_env_float("RETRY_DELAY_SECONDS", 2.0),
         corridor=os.getenv("INGEST_CORRIDOR", "hormuz"),
         commodity=os.getenv("INGEST_COMMODITY", "crude_oil"),
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
+        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+        eia_baseline_days=_env_int("EIA_BASELINE_DAYS", 30),
+        eia_vol_scale=_env_float("EIA_VOL_SCALE", 1.0),
     )

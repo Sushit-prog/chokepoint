@@ -1,6 +1,6 @@
 # Chokepoint
 
-Energy Supply Chain Resilience ingestion pipeline — M0 scaffold + M1 deterministic ingestion. The app boots, runs migrations, serves a `/health` endpoint backed by a live Postgres check, and ingests GDELT news, OFAC SDN, and EIA crude spot prices into `signals` idempotently. No LLM extraction, scoring, or auth yet.
+Energy Supply Chain Resilience ingestion pipeline — M0 scaffold, M1 deterministic ingestion, M2 feature extraction + risk scoring. Signals flow end to end: raw pulls → extracted features (LLM for GDELT, rules for OFAC/EIA) → a deterministic corridor risk score. No alerting yet.
 
 ## Stack
 
@@ -72,6 +72,43 @@ python -m src.ingestion.run --window-days 1
 python -m src.ingestion.run --window-days 1   # expect all [skipped]
 docker compose exec db psql -U postgres -d chokepoint \
   -c "SELECT source, count(*) FROM signals GROUP BY source;"
+```
+
+## Extraction & scoring (M2)
+
+Turns raw signals into `extracted_features`, then a single `risk_scores` row per window:
+
+```bash
+python -m src.extraction.run --window-days 1   # needs ANTHROPIC_API_KEY for GDELT only
+python -m src.scoring.run --window-days 1
+```
+
+- **GDELT**: each pending article gets one tool-forced Claude Haiku call (`ANTHROPIC_MODEL`, default `claude-haiku-4-5`) validated against the `ExtractedFeature` pydantic schema; invalid output retries exactly once, then the article is skipped (it stays pending for the next run). `model_used` records the API-reported model snapshot. One bad article never blocks the rest.
+- **OFAC SDN** (deterministic): `event_type=sanctions_listing`, severity by entry type — vessel 4.5 > entity 3.0 > individual 2.0 (unknown 2.5), `confidence=1.0`, `model_used=rule_based`.
+- **EIA** (deterministic): `event_type=price_movement`; severity = |day-over-day % change| ÷ trailing-median |% change| (30-point baseline, floored at 1% as a cold-start prior), capped at 5.
+- Reruns skip signals that already have an extracted feature — extraction is idempotent.
+
+### Scoring formula (`src/scoring/formula.py`)
+
+```
+score = 100 · Σ(wᵢ·cᵢ over sources present in window) / Σ(wᵢ present)
+gdelt_component = Σ sev·conf·exp(-ln2·hours/24) / GDELT_NORM(20)     clamp [0,1]
+ofac_component  = min(Σ severity, OFAC_CAP(25)) / OFAC_CAP           ← bounded
+eia_component   = Σ sev·conf·exp(-ln2·hours/24) / EIA_NORM(10)       clamp [0,1]
+weights: W_GDELT=0.5, W_OFAC=0.3, W_EIA=0.2
+```
+
+Missing sources renormalize rather than zero-fill. The OFAC cap is deliberate: thousands of accumulated Iran listings must not dominate the score linearly. Known future improvement (not built): OFAC delta/diff detection so new designations spike the score while the standing list contributes a stable baseline. An empty window writes no `risk_scores` row.
+
+Manual end-to-end check:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+python -m src.extraction.run --window-days 1
+python -m src.scoring.run --window-days 1
+docker compose exec db psql -U postgres -d chokepoint \
+  -c "SELECT event_type, model_used, count(*) FROM extracted_features GROUP BY 1,2;" \
+  -c "SELECT * FROM risk_scores ORDER BY computed_at DESC LIMIT 1;"
 ```
 
 ## Migrations
