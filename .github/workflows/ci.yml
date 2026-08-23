@@ -26,6 +26,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/chokepoint
+      EIA_API_KEY: dummy-key-for-mocked-tests
+      RETRY_DELAY_SECONDS: "0"
 
     steps:
       - uses: actions/checkout@v4
